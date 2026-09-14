@@ -155,7 +155,7 @@ async function tvl(api) {
 }
 
 module.exports = {
-    methodology: "TODO",
+    methodology: "The total value of all strategies that make up the Vault portfolio. TVL is calculated as the sum of the NAVs of all strategies within the Vault.",
 };
 
 Object.keys(vaults).forEach((chain) => {
