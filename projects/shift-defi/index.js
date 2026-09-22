@@ -1,7 +1,7 @@
 const sdk = require("@defillama/sdk");
 const { nullAddress } = require("../helper/tokenMapping");
 
-const TVL_REPORTER = ""; // same address on every chain
+const TVL_REPORTER = "0x0A4420823e2c415C9D5ABC668b0915b62f7409Fb"; // same address on every chain
 const NAV_DECIMALS = 18n;
 
 const abi = {
