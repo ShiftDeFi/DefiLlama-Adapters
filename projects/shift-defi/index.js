@@ -2,6 +2,8 @@ const sdk = require("@defillama/sdk");
 const { nullAddress } = require("../helper/tokenMapping");
 
 const TVL_REPORTER = "0x0A4420823e2c415C9D5ABC668b0915b62f7409Fb"; // same address on every chain
+const KYC_FACTORY = "";
+const USDC_USD_FEED = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"; // Chainlink USDC/USD
 const NAV_DECIMALS = 18n;
 
 const abi = {
@@ -12,6 +14,9 @@ const abi = {
   getStrategiesNav: "uint256:getStrategiesNav",
   getPreReshufflingSnapshot: "uint256:getPreReshufflingSnapshot",
   notion: "address:notion",
+  tvl: "uint256:tvl",
+  latestRoundData:
+    "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
 };
 
 const ContainerType = {
@@ -45,6 +50,15 @@ function scaleNavToToken(nav, tokenDecimals) {
   if (tokenDec === NAV_DECIMALS) return nav;
   if (tokenDec < NAV_DECIMALS) return nav / (10n ** (NAV_DECIMALS - tokenDec));
   return nav * (10n ** (tokenDec - NAV_DECIMALS));
+}
+
+function usd18ToToken(usd18, price, oracleDecimals, tokenDecimals) {
+  const priceBn = BigInt(price);
+  if (priceBn <= 0n) throw new Error("Invalid USDC/USD price");
+  return (
+    (usd18 * 10n ** BigInt(tokenDecimals) * 10n ** BigInt(oracleDecimals)) /
+    (priceBn * 10n ** NAV_DECIMALS)
+  );
 }
 
 async function getVaultTvl(api, vault) {
@@ -85,15 +99,29 @@ async function addVaultTvl(api, vault) {
   ]);
   const decimals = await api.call({ target: notion, abi: "erc20:decimals" });
   api.add(notion, scaleNavToToken(nav, decimals));
+  return { notion, decimals };
+}
+
+async function addKycFactoryTvl(api, notion, decimals) {
+  if (!KYC_FACTORY) return;
+  const [kycTvl, round, oracleDecimals] = await Promise.all([
+    api.call({ target: KYC_FACTORY, abi: abi.tvl }),
+    api.call({ target: USDC_USD_FEED, abi: abi.latestRoundData }),
+    api.call({ target: USDC_USD_FEED, abi: "uint8:decimals" }),
+  ]);
+  const price = BigInt(round.answer ?? round[1]);
+  api.add(notion, usd18ToToken(BigInt(kycTvl), price, oracleDecimals, decimals));
 }
 
 async function tvl(api) {
-  await Promise.all((vaults[api.chain] || []).map((vault) => addVaultTvl(api, vault)));
+  const chainVaults = vaults[api.chain] || [];
+  const results = await Promise.all(chainVaults.map((vault) => addVaultTvl(api, vault)));
+  if (results[0]) await addKycFactoryTvl(api, results[0].notion, results[0].decimals);
 }
 
 module.exports = {
   methodology:
-    "TVL is the sum of TvlReporter values across all chains with Local and Agent containers. If the vault is reshuffling, pre-reshuffling snapshots are used instead of live strategy NAVs.",
+    "Shift DeFi's total protocol TVL is calculated as the sum of the TVLs of all Vaults within the ecosystem. Each Vault's TVL is calculated as the sum of the NAVs of all strategies that make up the Vault's portfolio.",
 };
 
 Object.keys(vaults).forEach((chain) => {
