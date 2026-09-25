@@ -83,11 +83,13 @@ async function tvl(api) {
         getVaultNav(api, vault),
         api.call({ target: vault, abi: abi.notion }),
       ]);
-      const decimals = BigInt(await api.call({ target: notion, abi: abi.decimals }));
-      const decimalDifference = decimals - NAV_DECIMALS;
+      const notionDecimals = BigInt(await api.call({ target: notion, abi: abi.decimals }));
+      const tokenAmount = notionDecimals < NAV_DECIMALS
+        ? nav / 10n ** (NAV_DECIMALS - notionDecimals)
+        : nav * 10n ** (notionDecimals - NAV_DECIMALS);
       api.add(
         notion,
-        decimalDifference < 0n ? nav / 10n ** -decimalDifference : nav * 10n ** decimalDifference
+        tokenAmount
       );
     })
   );
