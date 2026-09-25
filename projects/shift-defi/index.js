@@ -6,6 +6,7 @@ const KYC_FACTORY = "0xf978187e7142D857D713503b3C3decD5778F2ACC"; // Ethereum KY
 const TVL_REPORTER = "0x0A4420823e2c415C9D5ABC668b0915b62f7409Fb"; // Same address on every chain
 const USDC_USD_FEED = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"; // Chainlink USDC/USD
 const NAV_DECIMALS = 18n;
+const PRINCIPAL_CONTAINER = 1;
 
 const abi = {
   getContainers: "function getContainers() view returns (address[] containers, uint256[] weights)",
@@ -18,51 +19,20 @@ const abi = {
   tvl: "function tvl(address account) view returns (uint256 total)",
   latestRoundData:
     "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
-};
-
-const ContainerType = {
-  LOCAL: 0,
-  PRINCIPAL: 1,
-  AGENT: 2,
+  decimals: "uint8:decimals",
 };
 
 const vaults = {
   ethereum: ["0x1d71c888961c4600cF0E31F6196b4dA7fE72e4B3"],
 };
 
-const chainIdToName = {};
-Object.entries(sdk.providerListJSON ?? {}).forEach(([name, { chainId }]) => {
-  if (chainId) chainIdToName[chainId] = name;
-});
+const chainNamesById = Object.fromEntries(
+  Object.entries(sdk.providerListJSON ?? {})
+    .filter(([, { chainId }]) => chainId)
+    .map(([name, { chainId }]) => [chainId, name])
+);
 
-function getChainName(chainId) {
-  const name = chainIdToName[Number(chainId)];
-  if (!name) throw new Error(`Unknown chainId ${chainId}`);
-  return name;
-}
-
-function getApiForChain(api, chainId) {
-  if (Number(chainId) === Number(api.chainId)) return api;
-  return new sdk.ChainApi({ chain: getChainName(chainId), timestamp: api.timestamp });
-}
-
-function scaleNavToToken(nav, tokenDecimals) {
-  const tokenDec = BigInt(tokenDecimals);
-  if (tokenDec === NAV_DECIMALS) return nav;
-  if (tokenDec < NAV_DECIMALS) return nav / (10n ** (NAV_DECIMALS - tokenDec));
-  return nav * (10n ** (tokenDec - NAV_DECIMALS));
-}
-
-function usd18ToToken(usd18, price, oracleDecimals, tokenDecimals) {
-  const priceBn = BigInt(price);
-  if (priceBn <= 0n) throw new Error("Invalid USDC/USD price");
-  return (
-    (usd18 * 10n ** BigInt(tokenDecimals) * 10n ** BigInt(oracleDecimals)) /
-    (priceBn * 10n ** NAV_DECIMALS)
-  );
-}
-
-async function getVaultTvl(api, vault) {
+async function getVaultNav(api, vault) {
   const [containersRes, isReshuffling] = await Promise.all([
     api.call({ target: vault, abi: abi.getContainers }),
     api.call({ target: vault, abi: abi.isReshuffling }),
@@ -72,52 +42,70 @@ async function getVaultTvl(api, vault) {
   );
   if (!containers.length) return 0n;
 
-  const types = await api.multiCall({ abi: abi.containerType, calls: containers });
+  const containerTypes = await api.multiCall({ abi: abi.containerType, calls: containers });
+  const principalContainers = containers.filter(
+    (_, index) => Number(containerTypes[index]) === PRINCIPAL_CONTAINER
+  );
   const chainIds = new Set();
-  const principals = [];
 
-  for (let i = 0; i < containers.length; i++) {
-    if (Number(types[i]) === ContainerType.PRINCIPAL) principals.push(containers[i]);
-    else chainIds.add(Number(api.chainId));
+  if (principalContainers.length < containers.length) {
+    chainIds.add(Number(api.chainId));
   }
-
-  if (principals.length) {
-    const remotes = await api.multiCall({ abi: abi.remoteChainId, calls: principals });
-    remotes.forEach((id) => chainIds.add(Number(id)));
+  if (principalContainers.length) {
+    const remoteChainIds = await api.multiCall({
+      abi: abi.remoteChainId,
+      calls: principalContainers,
+    });
+    remoteChainIds.forEach((chainId) => chainIds.add(Number(chainId)));
   }
 
   const navAbi = isReshuffling ? abi.getPreReshufflingSnapshot : abi.getStrategiesNav;
-  const navs = await Promise.all(
-    [...chainIds].map((id) => getApiForChain(api, id).call({ target: TVL_REPORTER, abi: navAbi }))
+  const navs = await Promise.all([...chainIds].map((chainId) => {
+    if (chainId === Number(api.chainId)) {
+      return api.call({ target: TVL_REPORTER, abi: navAbi });
+    }
+
+    const chain = chainNamesById[chainId];
+    if (!chain) throw new Error(`Unknown chainId ${chainId}`);
+    const chainApi = new sdk.ChainApi({ chain, timestamp: api.timestamp });
+    return chainApi.call({ target: TVL_REPORTER, abi: navAbi });
+  }));
+  return navs.reduce((total, nav) => total + BigInt(nav), 0n);
+}
+
+async function tvl(api) {
+  const vaultTokens = await Promise.all(
+    (vaults[api.chain] ?? []).map(async (vault) => {
+      const [nav, notion] = await Promise.all([
+        getVaultNav(api, vault),
+        api.call({ target: vault, abi: abi.notion }),
+      ]);
+      const decimals = BigInt(await api.call({ target: notion, abi: abi.decimals }));
+      const decimalDifference = decimals - NAV_DECIMALS;
+      const tokenAmount = decimalDifference < 0n
+        ? nav / 10n ** -decimalDifference
+        : nav * 10n ** decimalDifference;
+
+      api.add(notion, tokenAmount);
+      return { notion, decimals };
+    })
   );
-  return navs.reduce((acc, v) => acc + BigInt(v), 0n);
-}
 
-async function addVaultTvl(api, vault) {
-  const [nav, notion] = await Promise.all([
-    getVaultTvl(api, vault),
-    api.call({ target: vault, abi: abi.notion }),
-  ]);
-  const decimals = await api.call({ target: notion, abi: "erc20:decimals" });
-  api.add(notion, scaleNavToToken(nav, decimals));
-  return { notion, decimals };
-}
+  if (!vaultTokens.length) return;
 
-async function addKycFactoryTvl(api, notion, decimals) {
-  if (!KYC_FACTORY) return;
+  const [{ notion, decimals }] = vaultTokens;
   const [kycTvl, round, oracleDecimals] = await Promise.all([
     api.call({ target: KYC_FACTORY, abi: abi.tvl, params: [DEFII_OWNER] }),
     api.call({ target: USDC_USD_FEED, abi: abi.latestRoundData }),
     api.call({ target: USDC_USD_FEED, abi: "uint8:decimals" }),
   ]);
-  const price = BigInt(round.answer ?? round[1]);
-  api.add(notion, usd18ToToken(BigInt(kycTvl), price, oracleDecimals, decimals));
-}
+  const usdcPrice = BigInt(round.answer ?? round[1]);
+  if (usdcPrice <= 0n) throw new Error("Invalid USDC/USD price");
 
-async function tvl(api) {
-  const chainVaults = vaults[api.chain] || [];
-  const results = await Promise.all(chainVaults.map((vault) => addVaultTvl(api, vault)));
-  if (results[0]) await addKycFactoryTvl(api, results[0].notion, results[0].decimals);
+  const kycTokenAmount = (
+    BigInt(kycTvl) * 10n ** decimals * 10n ** BigInt(oracleDecimals)
+  ) / (usdcPrice * 10n ** NAV_DECIMALS);
+  api.add(notion, kycTokenAmount);
 }
 
 module.exports = {
