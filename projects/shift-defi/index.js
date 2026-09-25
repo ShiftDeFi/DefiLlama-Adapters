@@ -4,7 +4,6 @@ const { nullAddress } = require("../helper/tokenMapping");
 
 const DEFII_OWNER = "0x1B23418E688D2BB8EB9249D567Ec4bf4aA427CaC"; // KYC factory defii owner
 const KYC_FACTORY = "0xf978187e7142D857D713503b3C3decD5778F2ACC"; // Ethereum KYC Factory
-const TVL_REPORTER = "0x0A4420823e2c415C9D5ABC668b0915b62f7409Fb"; // Same address on every chain
 const USDC_USD_FEED = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"; // Chainlink USDC/USD
 const USDC = ADDRESSES.ethereum.USDC;
 const NAV_DECIMALS = 18n;
@@ -25,8 +24,12 @@ const abi = {
   decimals: "uint8:decimals",
 };
 
+
+// Chain -> Vault address -> TvlReporter
 const vaults = {
-  ethereum: ["0x1d71c888961c4600cF0E31F6196b4dA7fE72e4B3"],
+  ethereum: {
+    "0x1d71c888961c4600cF0E31F6196b4dA7fE72e4B3": "0x0A4420823e2c415C9D5ABC668b0915b62f7409Fb",
+  },
 };
 
 const chainNamesById = Object.fromEntries(
@@ -35,7 +38,7 @@ const chainNamesById = Object.fromEntries(
     .map(([name, { chainId }]) => [chainId, name])
 );
 
-async function getVaultNav(api, vault) {
+async function getVaultNav(api, vault, tvlReporter) {
   const [containersRes, isReshuffling] = await Promise.all([
     api.call({ target: vault, abi: abi.getContainers }),
     api.call({ target: vault, abi: abi.isReshuffling }),
@@ -65,22 +68,22 @@ async function getVaultNav(api, vault) {
   const navAbi = isReshuffling ? abi.getPreReshufflingSnapshot : abi.getStrategiesNav;
   const navs = await Promise.all([...chainIds].map((chainId) => {
     if (chainId === Number(api.chainId)) {
-      return api.call({ target: TVL_REPORTER, abi: navAbi });
+      return api.call({ target: tvlReporter, abi: navAbi });
     }
 
     const chain = chainNamesById[chainId];
     if (!chain) throw new Error(`Unknown chainId ${chainId}`);
     const chainApi = new sdk.ChainApi({ chain, timestamp: api.timestamp });
-    return chainApi.call({ target: TVL_REPORTER, abi: navAbi });
+    return chainApi.call({ target: tvlReporter, abi: navAbi });
   }));
   return navs.reduce((total, nav) => total + BigInt(nav), 0n);
 }
 
 async function tvl(api) {
   await Promise.all(
-    (vaults[api.chain] ?? []).map(async (vault) => {
+    Object.entries(vaults[api.chain] ?? {}).map(async ([vault, tvlReporter]) => {
       const [nav, notion] = await Promise.all([
-        getVaultNav(api, vault),
+        getVaultNav(api, vault, tvlReporter),
         api.call({ target: vault, abi: abi.notion }),
       ]);
       const notionDecimals = BigInt(await api.call({ target: notion, abi: abi.decimals }));
