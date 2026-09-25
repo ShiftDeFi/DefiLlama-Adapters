@@ -1,8 +1,9 @@
 const sdk = require("@defillama/sdk");
 const { nullAddress } = require("../helper/tokenMapping");
 
-const TVL_REPORTER = "0x0A4420823e2c415C9D5ABC668b0915b62f7409Fb"; // same address on every chain
-const KYC_FACTORY = "";
+const DEFII_OWNER = "0x1B23418E688D2BB8EB9249D567Ec4bf4aA427CaC"; // KYC factory defii owner
+const KYC_FACTORY = "0xf978187e7142D857D713503b3C3decD5778F2ACC"; // Ethereum KYC Factory
+const TVL_REPORTER = "0x0A4420823e2c415C9D5ABC668b0915b62f7409Fb"; // Same address on every chain
 const USDC_USD_FEED = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"; // Chainlink USDC/USD
 const NAV_DECIMALS = 18n;
 
@@ -14,7 +15,7 @@ const abi = {
   getStrategiesNav: "uint256:getStrategiesNav",
   getPreReshufflingSnapshot: "uint256:getPreReshufflingSnapshot",
   notion: "address:notion",
-  tvl: "uint256:tvl",
+  tvl: "function tvl(address account) view returns (uint256 total)",
   latestRoundData:
     "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
 };
@@ -105,7 +106,7 @@ async function addVaultTvl(api, vault) {
 async function addKycFactoryTvl(api, notion, decimals) {
   if (!KYC_FACTORY) return;
   const [kycTvl, round, oracleDecimals] = await Promise.all([
-    api.call({ target: KYC_FACTORY, abi: abi.tvl }),
+    api.call({ target: KYC_FACTORY, abi: abi.tvl, params: [DEFII_OWNER] }),
     api.call({ target: USDC_USD_FEED, abi: abi.latestRoundData }),
     api.call({ target: USDC_USD_FEED, abi: "uint8:decimals" }),
   ]);
